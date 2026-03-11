@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NARA NSDAP Crawler</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, system-ui, sans-serif; background: #0f1117; color: #e0e0e0; padding: 1.5rem; }
+  h1 { font-size: 1.4rem; margin-bottom: 1rem; color: #fff; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+  .card { background: #1a1d27; border-radius: 8px; padding: 1rem; }
+  .card .label { font-size: 0.75rem; color: #888; text-transform: uppercase; letter-spacing: 0.05em; }
+  .card .value { font-size: 1.5rem; font-weight: 700; margin-top: 0.25rem; }
+  .card .sub { font-size: 0.8rem; color: #666; margin-top: 0.2rem; }
+  .progress-wrap { background: #1a1d27; border-radius: 8px; padding: 1rem; margin-bottom: 1.5rem; }
+  .progress-bar { background: #2a2d37; border-radius: 4px; height: 28px; overflow: hidden; position: relative; }
+  .progress-fill { height: 100%; border-radius: 4px; transition: width 0.5s ease; }
+  .fill-done { background: linear-gradient(90deg, #22c55e, #16a34a); }
+  .fill-skip { background: #3b82f6; }
+  .fill-err { background: #ef4444; }
+  .progress-text { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 0.8rem; font-weight: 600; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,0.5); }
+  .chart-wrap { background: #1a1d27; border-radius: 8px; padding: 1rem; margin-bottom: 1.5rem; }
+  .errors-wrap { background: #1a1d27; border-radius: 8px; padding: 1rem; }
+  .errors-wrap h2 { font-size: 1rem; margin-bottom: 0.5rem; }
+  .error-list { max-height: 300px; overflow-y: auto; font-size: 0.8rem; font-family: monospace; }
+  .error-item { padding: 0.3rem 0; border-bottom: 1px solid #2a2d37; }
+  .error-ts { color: #888; }
+  .error-file { color: #f59e0b; }
+  .error-msg { color: #ef4444; }
+  .status-badge { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
+  .status-running { background: #22c55e33; color: #22c55e; }
+  .status-completed { background: #3b82f633; color: #3b82f6; }
+  .status-error { background: #ef444433; color: #ef4444; }
+  .status-starting { background: #f59e0b33; color: #f59e0b; }
+  .current { font-size: 0.85rem; color: #888; margin-top: 0.5rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+</style>
+</head>
+<body>
+
+<h1>NARA NSDAP PDF Crawler <span id="statusBadge" class="status-badge status-starting">starting</span></h1>
+
+<div class="progress-wrap">
+  <div class="progress-bar">
+    <div id="fillDone" class="progress-fill fill-done" style="width:0; position:absolute; left:0; top:0;"></div>
+    <div id="fillSkip" class="progress-fill fill-skip" style="width:0; position:absolute; top:0;"></div>
+    <div id="fillErr" class="progress-fill fill-err" style="width:0; position:absolute; top:0;"></div>
+    <span class="progress-text" id="progressText">0 / 0</span>
+  </div>
+  <div class="current" id="currentFile"></div>
+</div>
+
+<div class="grid">
+  <div class="card"><div class="label">Downloaded</div><div class="value" id="vDown">0</div><div class="sub" id="vDownBytes">0 B</div></div>
+  <div class="card"><div class="label">Skipped</div><div class="value" id="vSkip">0</div><div class="sub">already on storage</div></div>
+  <div class="card"><div class="label">Failed</div><div class="value" id="vFail">0</div><div class="sub" id="vConsec">0 consecutive</div></div>
+  <div class="card"><div class="label">Speed</div><div class="value" id="vSpeed">-</div><div class="sub">current file</div></div>
+  <div class="card"><div class="label">ETA</div><div class="value" id="vEta">-</div><div class="sub" id="vElapsed">-</div></div>
+  <div class="card"><div class="label">Remaining</div><div class="value" id="vRemain">-</div><div class="sub">of <span id="vTotal">0</span> total</div></div>
+</div>
+
+<div class="chart-wrap">
+  <canvas id="chart" height="180"></canvas>
+</div>
+
+<div class="errors-wrap">
+  <h2>Recent Errors <span id="errCount" style="color:#888; font-weight:400">(0)</span></h2>
+  <div class="error-list" id="errorList"></div>
+</div>
+
+<script>
+const ctx = document.getElementById('chart').getContext('2d');
+const chart = new Chart(ctx, {
+  type: 'line',
+  data: {
+    labels: [],
+    datasets: [
+      { label: 'Downloads/h', data: [], borderColor: '#22c55e', backgroundColor: '#22c55e22', fill: true, tension: 0.3 },
+      { label: 'Errors/h', data: [], borderColor: '#ef4444', backgroundColor: '#ef444422', fill: true, tension: 0.3 }
+    ]
+  },
+  options: {
+    responsive: true,
+    interaction: { intersect: false, mode: 'index' },
+    scales: {
+      x: { grid: { color: '#2a2d37' }, ticks: { color: '#888', maxTicksLimit: 12 } },
+      y: { grid: { color: '#2a2d37' }, ticks: { color: '#888' }, beginAtZero: true }
+    },
+    plugins: { legend: { labels: { color: '#ccc' } } }
+  }
+});
+
+function fmtBytes(b) {
+  const u = ['B','KB','MB','GB','TB'];
+  let i = 0;
+  while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
+  return b.toFixed(1) + ' ' + u[i];
+}
+
+function fmtDur(s) {
+  if (s < 60) return Math.round(s) + 's';
+  if (s < 3600) return Math.round(s/60) + 'm';
+  const h = s / 3600;
+  if (h < 24) return h.toFixed(1) + 'h';
+  return (h/24).toFixed(1) + 'd';
+}
+
+function escapeText(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.textContent;
+}
+
+function renderErrors(errors) {
+  const el = document.getElementById('errorList');
+  el.replaceChildren();
+  errors.slice().reverse().forEach(function(e) {
+    const item = document.createElement('div');
+    item.className = 'error-item';
+    const ts = document.createElement('span');
+    ts.className = 'error-ts';
+    ts.textContent = e.ts.split('T')[1].split('.')[0];
+    const file = document.createElement('span');
+    file.className = 'error-file';
+    file.textContent = ' ' + e.file + ' ';
+    const msg = document.createElement('span');
+    msg.className = 'error-msg';
+    msg.textContent = e.error.substring(0, 120);
+    item.appendChild(ts);
+    item.appendChild(file);
+    item.appendChild(msg);
+    el.appendChild(item);
+  });
+}
+
+async function poll() {
+  try {
+    const r = await fetch('/api/status');
+    if (r.status === 401) { location.reload(); return; }
+    const d = await r.json();
+
+    const done = d.downloaded + d.skipped;
+    const total = d.total || 1;
+    const pDone = (d.downloaded / total * 100).toFixed(1);
+    const pSkip = (d.skipped / total * 100).toFixed(1);
+    const pFail = (d.failed / total * 100).toFixed(1);
+
+    document.getElementById('fillDone').style.width = pDone + '%';
+    document.getElementById('fillSkip').style.width = pSkip + '%';
+    document.getElementById('fillSkip').style.left = pDone + '%';
+    document.getElementById('fillErr').style.width = pFail + '%';
+    document.getElementById('fillErr').style.left = (parseFloat(pDone) + parseFloat(pSkip)) + '%';
+    document.getElementById('progressText').textContent = done + ' / ' + total + ' (' + (done/total*100).toFixed(1) + '%)';
+
+    document.getElementById('vDown').textContent = d.downloaded;
+    document.getElementById('vDownBytes').textContent = fmtBytes(d.bytes_total);
+    document.getElementById('vSkip').textContent = d.skipped;
+    document.getElementById('vFail').textContent = d.failed;
+    document.getElementById('vConsec').textContent = d.consecutive_errors + ' consecutive';
+    document.getElementById('vSpeed').textContent = d.speed_bps > 0 ? fmtBytes(d.speed_bps) + '/s' : '-';
+    document.getElementById('vTotal').textContent = total;
+    document.getElementById('currentFile').textContent = d.current_file ? 'Downloading: ' + d.current_file + (d.current_size ? ' (' + fmtBytes(d.current_size) + ')' : '') : '';
+
+    if (d.started_at && done > 0) {
+      const elapsed = (Date.now() - new Date(d.started_at).getTime()) / 1000;
+      const rate = done / elapsed;
+      const remain = (total - done) / rate;
+      document.getElementById('vEta').textContent = fmtDur(remain);
+      document.getElementById('vElapsed').textContent = 'elapsed: ' + fmtDur(elapsed);
+      document.getElementById('vRemain').textContent = total - done;
+    }
+
+    const badge = document.getElementById('statusBadge');
+    badge.textContent = d.status;
+    badge.className = 'status-badge status-' + (
+      d.status === 'running' ? 'running' :
+      d.status === 'completed' ? 'completed' :
+      d.status.includes('error') ? 'error' : 'starting'
+    );
+
+    if (d.history.length > 0) {
+      chart.data.labels = d.history.map(function(h) { return h.ts.split('T')[1] + ':00'; });
+      chart.data.datasets[0].data = d.history.map(function(h) { return h.downloaded; });
+      chart.data.datasets[1].data = d.history.map(function(h) { return h.failed; });
+      chart.update('none');
+    }
+
+    document.getElementById('errCount').textContent = '(' + d.errors.length + ')';
+    renderErrors(d.errors);
+
+  } catch(e) { console.error('Poll error:', e); }
+}
+
+setInterval(poll, 5000);
+poll();
+</script>
+</body>
+</html>
