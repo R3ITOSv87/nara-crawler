@@ -58,6 +58,7 @@
   <div class="card"><div class="label">Speed</div><div class="value" id="vSpeed">-</div><div class="sub">current file</div></div>
   <div class="card"><div class="label">ETA</div><div class="value" id="vEta">-</div><div class="sub" id="vElapsed">-</div></div>
   <div class="card"><div class="label">Remaining</div><div class="value" id="vRemain">-</div><div class="sub">of <span id="vTotal">0</span> total</div></div>
+  <div class="card"><div class="label">Workers</div><div class="value" id="vWorkers">-</div><div class="sub" id="vActive">0 active</div></div>
 </div>
 
 <div class="chart-wrap">
@@ -160,7 +161,10 @@ async function poll() {
     document.getElementById('vConsec').textContent = d.consecutive_errors + ' consecutive';
     document.getElementById('vSpeed').textContent = d.speed_bps > 0 ? fmtBytes(d.speed_bps) + '/s' : '-';
     document.getElementById('vTotal').textContent = total;
-    document.getElementById('currentFile').textContent = d.current_file ? 'Downloading: ' + d.current_file + (d.current_size ? ' (' + fmtBytes(d.current_size) + ')' : '') : '';
+    document.getElementById('vWorkers').textContent = d.workers || '-';
+    document.getElementById('vActive').textContent = (d.current_files || []).length + ' active';
+    var files = d.current_files || [];
+    document.getElementById('currentFile').textContent = files.length > 0 ? 'Downloading (' + files.length + '): ' + files.join(', ') : '';
 
     if (d.started_at && done > 0) {
       const elapsed = (Date.now() - new Date(d.started_at).getTime()) / 1000;
