@@ -1,21 +1,115 @@
 # NARA NSDAP PDF Crawler
 
-Lädt alle 5 442 NSDAP-Personalakten-PDFs aus dem [NARA](https://www.archives.gov/) S3-Bucket herunter, speichert sie auf einer Hetzner Storage Box (SFTP) und kann sie optional seitenweise als WebP auf jeden S3-kompatiblen Speicher exportieren.
+Lädt alle 5 442 NSDAP-Personalakten-PDFs aus dem [NARA](https://www.archives.gov/) S3-Bucket herunter, speichert sie auf einer Hetzner Storage Box (SFTP) und exportiert sie optional seitenweise als WebP auf jeden S3-kompatiblen Speicher.
 
 ## Ablauf
 
 ```
-NARA S3  →  lokales /tmp  →  (WebP-Export → S3-Speicher)  →  Storage Box (SFTP)
+NARA S3  →  /tmp/nara-downloads  →  (WebP-Export → S3-Speicher)  →  Storage Box via SFTP
 ```
 
-1. `urls.json` enthält die vorbereitete Liste aller 5 442 PDFs (Titel, Dateiname, S3-URL).
-2. Beim Start verbindet sich die App mit der Storage Box und legt ggf. den Ordner `pdfs/` an.
-3. Bis zu `WORKERS` parallele Threads laden je eine PDF-Datei von NARA nach `/tmp/nara-downloads/`.
-4. **Optional:** Jede Seite der PDF wird mit PyMuPDF in WebP umgewandelt und einzeln auf einen S3-kompatiblen Speicher hochgeladen (`{S3_PREFIX}/{dateiname}/page_0001.webp`, …).
-5. Die fertige PDF-Datei wird per SFTP auf die Storage Box übertragen, die lokale Temp-Datei wird gelöscht.
-6. Bereits vorhandene Dateien werden übersprungen — der Crawler ist jederzeit unterbrechbar und fortsetzbar.
-7. Ein Flask-Dashboard auf Port 8080 zeigt Fortschritt, Geschwindigkeit, ETA und Fehler in Echtzeit.
-8. Pushover-Benachrichtigungen werden beim Start, alle 500 Dateien, bei 5+ Fehler in Folge und bei Abschluss gesendet.
+1. `urls.json` enthält die vorbereitete Liste aller 5 442 PDFs.
+2. Beim Start wird die SFTP-Verbindung getestet und `pdfs/` angelegt, falls nicht vorhanden.
+3. Bis zu `WORKERS` parallele Threads laden je eine Datei von NARA nach `/tmp/nara-downloads/` (2 MB-Chunks, streaming).
+4. **Optional:** Jede Seite wird mit PyMuPDF in WebP umgewandelt und einzeln auf S3 hochgeladen.
+5. Die fertige PDF wird per SFTP auf die Storage Box übertragen, die lokale Temp-Datei wird gelöscht.
+6. Bereits vorhandene Dateien auf der Storage Box werden übersprungen — der Crawler kann jederzeit unterbrochen und fortgesetzt werden.
+7. Fehler werden geloggt; bei 5+ Fehlern in Folge, SFTP-Ausfall oder 15 min Inaktivität werden Pushover-Alerts mit hoher Priorität gesendet.
+
+## `urls.json`-Format
+
+```json
+{
+  "total_api": 5442,
+  "total_pdfs": 5442,
+  "items": [
+    {
+      "naId": "581244230",
+      "title": "A3340-MFKL: Number A0001",
+      "pdf_url": "https://s3.amazonaws.com/NARAprodstorage/.../A3340-MFKL-A0001.pdf",
+      "filename": "A3340-MFKL-A0001.pdf",
+      "digital_objects": 3023
+    }
+  ]
+}
+```
+
+`digital_objects` entspricht ungefähr der Seitenzahl der PDF.
+
+## Crawler-Verhalten
+
+### Parallelismus & Pausen
+
+- `WORKERS` Threads laufen gleichzeitig, jeder mit eigener SFTP- und S3-Verbindung.
+- Zwischen den Submissions wird eine zufällige Pause von `PAUSE_MIN`–`PAUSE_MAX` Sekunden eingebaut, aufgeteilt durch `WORKERS`. Effektive Wartezeit pro Worker: `Pause / WORKERS`.
+
+### Fehlerbehandlung & Reconnect
+
+- Bei jedem Fehler schließt der betroffene Worker seine SFTP-Verbindung und baut sie sofort neu auf.
+- Die letzten 50 Fehler werden im State und im Dashboard gespeichert.
+- Bei 5+ Fehlern in Folge: Pushover-Alert mit `priority=1`.
+
+### Watchdog
+
+- Wenn 15 Minuten lang kein erfolgreicher Download stattgefunden hat: Pushover-Alert mit `priority=1`.
+
+### Stündliche Statistik
+
+- Downloads, Fehler und übertragene Bytes werden stündlich aggregiert.
+- Die letzten 168 Stunden (7 Tage) werden im RAM gehalten und im Dashboard als Liniendiagramm dargestellt.
+
+### Status-Zustände
+
+| Status | Bedeutung |
+|---|---|
+| `starting` | App startet, noch keine Verbindung |
+| `connecting` | SFTP-Verbindungstest läuft |
+| `running` | Crawler aktiv |
+| `completed` | Alle Dateien verarbeitet |
+| `sftp_error: ...` | SFTP-Verbindung beim Start fehlgeschlagen |
+
+## Pushover-Benachrichtigungen
+
+| Ereignis | Priorität |
+|---|---|
+| Crawler gestartet | 0 (normal) |
+| Alle 500 Dateien (Milestone) | 0 (normal) |
+| Abschluss | 0 (normal) |
+| 5+ Fehler in Folge | 1 (hoch) |
+| SFTP-Verbindung fehlgeschlagen | 1 (hoch) |
+| 15 min kein Download | 1 (hoch) |
+
+## API
+
+### `GET /api/status`
+
+Gibt den kompletten Crawler-State als JSON zurück (HTTP Basic Auth erforderlich).
+
+```json
+{
+  "status": "running",
+  "total": 5442,
+  "downloaded": 312,
+  "skipped": 0,
+  "failed": 2,
+  "bytes_total": 48318545920,
+  "current_files": ["A3340-MFKL-A0045.pdf", "A3340-MFKL-A0046.pdf"],
+  "current_size": 376392250,
+  "started_at": "2026-05-11T10:00:00+00:00",
+  "last_download_at": "2026-05-11T10:42:17+00:00",
+  "speed_bps": 19500000,
+  "consecutive_errors": 0,
+  "workers": 4,
+  "webp_enabled": false,
+  "webp_pages": 0,
+  "history": [
+    { "ts": "2026-05-11T10", "downloaded": 180, "failed": 1, "bytes": 0 }
+  ],
+  "errors": [
+    { "ts": "...", "file": "A3340-MFKL-A0012.pdf", "error": "..." }
+  ]
+}
+```
 
 ## Umgebungsvariablen
 
@@ -39,22 +133,23 @@ NARA S3  →  lokales /tmp  →  (WebP-Export → S3-Speicher)  →  Storage Box
 
 | Variable | Standard | Beschreibung |
 |---|---|---|
-| `WORKERS` | `4` | Anzahl paralleler Download-Threads |
-| `PAUSE_MIN` / `PAUSE_MAX` | `1.0` / `2.5` | Zufällige Pause zwischen Downloads (Sekunden) |
+| `WORKERS` | `4` | Parallele Download-Threads |
+| `PAUSE_MIN` | `1.0` | Minimale Pause zwischen Submissions (Sekunden) |
+| `PAUSE_MAX` | `2.5` | Maximale Pause zwischen Submissions (Sekunden) |
 
 ### WebP-Export (optional)
 
-Wird aktiviert, sobald alle vier S3-Variablen gesetzt sind. Kompatibel mit AWS S3, Backblaze B2, Cloudflare R2, MinIO und jedem anderen S3-kompatiblen Dienst.
+Wird aktiviert, sobald alle vier S3-Variablen gesetzt sind. Kompatibel mit AWS S3, Cloudflare R2, Backblaze B2, MinIO und jedem anderen S3-kompatiblen Dienst.
 
 | Variable | Standard | Beschreibung |
 |---|---|---|
-| `S3_ENDPOINT` | *(leer)* | S3-Endpunkt-URL, z. B. `https://s3.eu-central-1.amazonaws.com` oder `https://<account>.r2.cloudflarestorage.com` |
+| `S3_ENDPOINT` | *(leer)* | S3-Endpunkt-URL |
 | `S3_BUCKET` | *(leer)* | Ziel-Bucket-Name |
 | `S3_ACCESS_KEY` | *(leer)* | Access Key ID |
 | `S3_SECRET_KEY` | *(leer)* | Secret Access Key |
-| `S3_REGION` | `auto` | Region (bei Cloudflare R2 / MinIO: `auto`) |
-| `S3_PREFIX` | `webp` | Pfad-Präfix innerhalb des Buckets |
-| `WEBP_DPI` | `150` | Auflösung beim Rendern (150 DPI ≈ 1240 × 1754 px bei A4) |
+| `S3_REGION` | `auto` | Region (bei R2/MinIO: `auto`) |
+| `S3_PREFIX` | `webp` | Pfad-Präfix im Bucket |
+| `WEBP_DPI` | `150` | Render-Auflösung (150 DPI ≈ 1240 × 1754 px bei A4) |
 | `WEBP_QUALITY` | `85` | WebP-Qualität (1–100) |
 
 **Pfadstruktur im Bucket:**
@@ -64,10 +159,9 @@ webp/
     page_0001.webp
     page_0002.webp
     ...
-  A3340-MFKL-A0002/
-    page_0001.webp
-    ...
 ```
+
+`page_0001.webp` dient als Marker — ist sie vorhanden, wird die Datei übersprungen.
 
 ### Pushover (optional)
 
@@ -147,32 +241,29 @@ docker run -d \
   -p 8080:8080 \
   nara-crawler
 ```
-> Bei MinIO ohne TLS `http://` verwenden. Die Region kann beliebig gesetzt werden (MinIO ignoriert sie).
 
 ## Lokal starten
 
 ```bash
 pip install -r requirements.txt
-
 STORAGEBOX_PASS=... DASHBOARD_PASS=... python app.py
 ```
 
 ## Dashboard
 
-Erreichbar unter `http://localhost:8080` (HTTP Basic Auth).  
-Aktualisiert sich automatisch alle 5 Sekunden.
+Erreichbar unter `http://localhost:8080` (HTTP Basic Auth), aktualisiert sich alle 5 Sekunden.
 
 | Anzeige | Beschreibung |
 |---|---|
-| Fortschrittsbalken | Heruntergeladen / Übersprungen / Fehlgeschlagen |
-| Speed & ETA | Aktuelle Übertragungsrate und geschätzte Restzeit |
-| Aktive Dateien | Welche Dateien gerade von welchen Workern bearbeitet werden |
-| WebP Seiten | Nur sichtbar wenn S3 konfiguriert — Anzahl hochgeladener WebP-Seiten |
-| Stundenchart | Downloads und Fehler pro Stunde (letzte 168 Stunden) |
-| Fehlerlog | Die letzten 50 Fehler mit Zeitstempel und Dateiname |
+| Fortschrittsbalken | Heruntergeladen (grün) / Übersprungen (blau) / Fehlgeschlagen (rot) |
+| Speed & ETA | Aktuelle Übertragungsrate des zuletzt abgeschlossenen Downloads |
+| Aktive Dateien | Dateinamen aller gerade laufenden Downloads |
+| WebP Seiten | Nur sichtbar wenn S3 konfiguriert — Gesamtzahl hochgeladener WebP-Seiten |
+| Stundenchart | Downloads und Fehler pro Stunde (letzte 168 Stunden / 7 Tage) |
+| Fehlerlog | Letzte 50 Fehler mit Zeitstempel, Dateiname und Fehlermeldung |
 
 ## Hinweise
 
-- Die PDFs sind groß (typisch 100–400 MB je Datei, bis zu 3 000 Seiten). Der WebP-Export ist CPU-intensiv; bei aktiviertem Export verlängert sich die Gesamtlaufzeit erheblich.
-- Jeder Worker hält eine eigene SFTP- und S3-Verbindung offen. Bei Verbindungsabbrüchen wird automatisch neu verbunden.
-- Die Seite `page_0001.webp` dient als Marker: Ist sie bereits im Bucket vorhanden, wird die Datei beim WebP-Export übersprungen.
+- Die PDFs sind groß (typisch 100–400 MB, bis zu 3 000 Seiten). WebP-Export ist CPU-intensiv und verlängert die Gesamtlaufzeit erheblich.
+- Das lokale Temp-Verzeichnis `/tmp/nara-downloads` ist hardcoded. Genug Speicherplatz für gleichzeitig `WORKERS` PDFs einplanen (worst case ~1,5 GB pro Worker).
+- Gunicorn läuft mit 1 Worker-Prozess und 4 Threads (Timeout 120 s). Der Crawler selbst läuft als Daemon-Thread außerhalb von Gunicorn.
