@@ -59,6 +59,7 @@
   <div class="card"><div class="label">ETA</div><div class="value" id="vEta">-</div><div class="sub" id="vElapsed">-</div></div>
   <div class="card"><div class="label">Remaining</div><div class="value" id="vRemain">-</div><div class="sub">of <span id="vTotal">0</span> total</div></div>
   <div class="card"><div class="label">Workers</div><div class="value" id="vWorkers">-</div><div class="sub" id="vActive">0 active</div></div>
+  <div class="card" id="webpCard" style="display:none"><div class="label">WebP Seiten</div><div class="value" id="vWebp">0</div><div class="sub">auf S3 hochgeladen</div></div>
 </div>
 
 <div class="chart-wrap">
@@ -163,6 +164,10 @@ async function poll() {
     document.getElementById('vTotal').textContent = total;
     document.getElementById('vWorkers').textContent = d.workers || '-';
     document.getElementById('vActive').textContent = (d.current_files || []).length + ' active';
+    if (d.webp_enabled) {
+      document.getElementById('webpCard').style.display = '';
+      document.getElementById('vWebp').textContent = d.webp_pages || 0;
+    }
     var files = d.current_files || [];
     document.getElementById('currentFile').textContent = files.length > 0 ? 'Downloading (' + files.length + '): ' + files.join(', ') : '';
 

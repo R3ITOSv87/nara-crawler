@@ -10,8 +10,11 @@ from functools import wraps
 from pathlib import Path
 from queue import Queue
 
+import boto3
+import fitz  # PyMuPDF
 import httpx
 import paramiko
+from botocore.config import Config as BotocoreConfig
 from flask import Flask, Response, jsonify, render_template
 
 # --- Config ---
@@ -28,6 +31,17 @@ PAUSE_MAX = float(os.environ.get("PAUSE_MAX", "2.5"))
 WORKERS = int(os.environ.get("WORKERS", "4"))
 URLS_FILE = Path(__file__).parent / "urls.json"
 LOCAL_TMP = Path("/tmp/nara-downloads")
+
+# --- S3 / WebP config ---
+S3_ENDPOINT   = os.environ.get("S3_ENDPOINT", "")
+S3_BUCKET     = os.environ.get("S3_BUCKET", "")
+S3_ACCESS_KEY = os.environ.get("S3_ACCESS_KEY", "")
+S3_SECRET_KEY = os.environ.get("S3_SECRET_KEY", "")
+S3_REGION     = os.environ.get("S3_REGION", "auto")
+S3_PREFIX     = os.environ.get("S3_PREFIX", "webp")
+WEBP_DPI      = int(os.environ.get("WEBP_DPI", "150"))
+WEBP_QUALITY  = int(os.environ.get("WEBP_QUALITY", "85"))
+WEBP_ENABLED  = bool(S3_ENDPOINT and S3_BUCKET and S3_ACCESS_KEY and S3_SECRET_KEY)
 
 # --- State ---
 state = {
@@ -46,6 +60,8 @@ state = {
     "workers": WORKERS,
     "history": [],
     "errors": [],
+    "webp_pages": 0,
+    "webp_enabled": WEBP_ENABLED,
 }
 state_lock = threading.Lock()
 
@@ -136,7 +152,22 @@ def download_one(item, worker_id):
                     f.write(chunk)
                     downloaded_bytes += len(chunk)
 
-        # Phase 2: Upload local file to Storage Box via SFTP
+        # Phase 2: WebP export → S3 (optional)
+        if WEBP_ENABLED:
+            try:
+                pages = convert_and_upload_webp(local_path, filename)
+                with state_lock:
+                    state["webp_pages"] += pages
+            except Exception as e:
+                with state_lock:
+                    state["errors"].append({
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                        "file": filename,
+                        "error": f"WebP/S3: {str(e)[:280]}",
+                    })
+                    state["errors"] = state["errors"][-50:]
+
+        # Phase 3: Upload local file to Storage Box via SFTP
         sftp.put(str(local_path), remote_path)
 
         # Cleanup local file
@@ -193,6 +224,51 @@ def download_one(item, worker_id):
 
 # Thread-local SFTP connections
 _tls = threading.local()
+
+# Thread-local S3 clients
+_s3l = threading.local()
+
+
+def _get_s3():
+    if not hasattr(_s3l, "client"):
+        _s3l.client = boto3.client(
+            "s3",
+            endpoint_url=S3_ENDPOINT or None,
+            aws_access_key_id=S3_ACCESS_KEY,
+            aws_secret_access_key=S3_SECRET_KEY,
+            region_name=S3_REGION,
+            config=BotocoreConfig(signature_version="s3v4"),
+        )
+    return _s3l.client
+
+
+def convert_and_upload_webp(local_path: Path, filename: str) -> int:
+    """Convert every PDF page to WebP and upload to S3-compatible storage. Returns pages uploaded (0 = already done)."""
+    stem = Path(filename).stem
+    s3 = _get_s3()
+    first_key = f"{S3_PREFIX}/{stem}/page_0001.webp"
+    try:
+        s3.head_object(Bucket=S3_BUCKET, Key=first_key)
+        return 0  # already processed
+    except Exception:
+        pass
+
+    doc = fitz.open(str(local_path))
+    mat = fitz.Matrix(WEBP_DPI / 72, WEBP_DPI / 72)
+    pages_done = 0
+    try:
+        for i, page in enumerate(doc):
+            pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
+            s3.put_object(
+                Bucket=S3_BUCKET,
+                Key=f"{S3_PREFIX}/{stem}/page_{i + 1:04d}.webp",
+                Body=pix.tobytes("webp", jpg_quality=WEBP_QUALITY),
+                ContentType="image/webp",
+            )
+            pages_done += 1
+    finally:
+        doc.close()
+    return pages_done
 
 
 def _thread_local(force_reconnect=False):
