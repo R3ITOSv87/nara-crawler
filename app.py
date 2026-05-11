@@ -18,9 +18,9 @@ from botocore.config import Config as BotocoreConfig
 from flask import Flask, Response, jsonify, render_template
 
 # --- Config ---
-STORAGEBOX_HOST = os.environ.get("STORAGEBOX_HOST", "u506918-sub2.your-storagebox.de")
+STORAGEBOX_HOST = os.environ.get("STORAGEBOX_HOST", "u0123456.your-storagebox.de")
 STORAGEBOX_PORT = int(os.environ.get("STORAGEBOX_PORT", "23"))
-STORAGEBOX_USER = os.environ.get("STORAGEBOX_USER", "u506918-sub2")
+STORAGEBOX_USER = os.environ.get("STORAGEBOX_USER", "u0123456-s1")
 STORAGEBOX_PASS = os.environ.get("STORAGEBOX_PASS", "")
 DASHBOARD_USER = os.environ.get("DASHBOARD_USER", "admin")
 DASHBOARD_PASS = os.environ.get("DASHBOARD_PASS", "")
